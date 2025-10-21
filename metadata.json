@@ -1,0 +1,7 @@
+{
+  "name": "Eburon CSR Studio",
+  "description": "A mobile-first CSR agent portal powered by Gemini Live for real-time conversational support, featuring live transcription, AI-powered assistance, and call management tools.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
