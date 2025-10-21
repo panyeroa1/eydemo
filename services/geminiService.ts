@@ -1,5 +1,6 @@
 
-import { GoogleGenAI, LiveServerMessage, Modality, Blob, LiveSession } from "@google/genai";
+// FIX: Removed non-exported 'LiveSession' type from import.
+import { GoogleGenAI, LiveServerMessage, Modality, Blob } from "@google/genai";
 import type { TranscriptMessage } from '../types';
 
 // --- Audio Encoding/Decoding Helpers ---
@@ -12,7 +13,7 @@ function encode(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
-function decode(base64: string): Uint8Array {
+export function decode(base64: string): Uint8Array {
   const binaryString = atob(base64);
   const len = binaryString.length;
   const bytes = new Uint8Array(len);
@@ -22,7 +23,7 @@ function decode(base64: string): Uint8Array {
   return bytes;
 }
 
-async function decodeAudioData(
+export async function decodeAudioData(
   data: Uint8Array,
   ctx: AudioContext,
   sampleRate: number,
@@ -64,7 +65,8 @@ export class GeminiLiveService {
   private outputGainNode: GainNode | null = null;
   private nextStartTime = 0;
   private audioSources = new Set<AudioBufferSourceNode>();
-  private sessionPromise: Promise<LiveSession> | null = null;
+  // FIX: Replaced non-exported 'LiveSession' with 'any' for the session promise.
+  private sessionPromise: Promise<any> | null = null;
   private currentInputTranscription = '';
   private currentOutputTranscription = '';
 
@@ -74,10 +76,32 @@ export class GeminiLiveService {
     }
     this.ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
   }
+  
+  public async generateSpeech(text: string, voiceName: string): Promise<string | null> {
+    try {
+      const response = await this.ai.models.generateContent({
+        model: "gemini-2.5-flash-preview-tts",
+        contents: [{ parts: [{ text }] }],
+        config: {
+          responseModalities: [Modality.AUDIO],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: { voiceName: voiceName },
+            },
+          },
+        },
+      });
+      return response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data ?? null;
+    } catch (error) {
+      console.error("Speech generation error:", error);
+      return null;
+    }
+  }
 
   public async connect(
     onMessage: (message: TranscriptMessage) => void,
     onStatusChange: (status: 'live' | 'error' | 'disconnected') => void,
+    personaConfig: { systemPrompt: string; voice: string; }
   ): Promise<void> {
     
     this.inputAudioContext = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
@@ -124,32 +148,33 @@ export class GeminiLiveService {
       },
       config: {
         responseModalities: [Modality.AUDIO],
-        speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Zephyr' } } },
+        speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: personaConfig.voice } } },
         inputAudioTranscription: {},
         outputAudioTranscription: {},
-        systemInstruction: `You are “Eburon CSR Studio” — a real-time conversational CSR assistant. You speak naturally, succinctly, and helpfully. You never disclose internal engines or model names. If asked “who are you?”, answer: “I’m a customer service assistant.” You follow company policy, protect private data, and keep a calm presence in every situation.`
+        systemInstruction: personaConfig.systemPrompt
       },
     });
   }
 
+  // FIX: Rewrote server message handling to use 'turnComplete' instead of the non-existent 'isFinal' property on transcriptions.
   private async handleServerMessage(message: LiveServerMessage, onMessage: (message: TranscriptMessage) => void) {
-    // Handle transcriptions
+    // Handle transcriptions by accumulating text parts.
     if (message.serverContent?.inputTranscription) {
-      const text = message.serverContent.inputTranscription.text;
-      if (message.serverContent.inputTranscription.isFinal) {
-         onMessage({ speaker: 'Caller', text: this.currentInputTranscription + text });
-         this.currentInputTranscription = '';
-      } else {
-        this.currentInputTranscription += text;
-      }
+      this.currentInputTranscription += message.serverContent.inputTranscription.text;
     }
     if (message.serverContent?.outputTranscription) {
-      const text = message.serverContent.outputTranscription.text;
-      if (message.serverContent.outputTranscription.isFinal) {
-        onMessage({ speaker: 'Agent', text: this.currentOutputTranscription + text });
+      this.currentOutputTranscription += message.serverContent.outputTranscription.text;
+    }
+
+    // When a turn is complete, send the full transcription and reset the buffers.
+    if (message.serverContent?.turnComplete) {
+      if (this.currentInputTranscription) {
+        onMessage({ speaker: 'Caller', text: this.currentInputTranscription });
+        this.currentInputTranscription = '';
+      }
+      if (this.currentOutputTranscription) {
+        onMessage({ speaker: 'Agent', text: this.currentOutputTranscription });
         this.currentOutputTranscription = '';
-      } else {
-        this.currentOutputTranscription += text;
       }
     }
 
@@ -167,6 +192,7 @@ export class GeminiLiveService {
       this.audioSources.add(source);
     }
     
+    // Handle interruptions by stopping all playing audio.
     if (message.serverContent?.interrupted) {
       for (const source of this.audioSources.values()) {
         source.stop();
